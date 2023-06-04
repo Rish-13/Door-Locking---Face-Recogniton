@@ -1,0 +1,159 @@
+import smbus
+import time
+import cv2
+import glob
+import face_recognition
+import numpy as np
+from datetime import datetime
+from datetime import date
+import os
+import RPi.GPIO as GPIO
+
+GPIO.setmode(GPIO.BCM)  # Broadcom pin-numbering scheme
+GPIO.setup(20, GPIO.OUT)  # Output pin for relay control
+
+# LCD Display Configuration
+I2C_ADDR = 0x27  # I2C device address
+LCD_WIDTH = 16  # Maximum characters per line
+
+LCD_CHR = 1  # Mode - Sending data
+LCD_CMD = 0  # Mode - Sending command
+
+LCD_LINE_1 = 0x80  # LCD RAM address for the 1st line
+LCD_LINE_2 = 0xC0  # LCD RAM address for the 2nd line
+
+LCD_BACKLIGHT = 0x08  # LCD backlight control
+ENABLE = 0b00000100  # Enable bit
+
+E_PULSE = 0.0005  # Timing constants
+E_DELAY = 0.0005
+
+bus = smbus.SMBus(1)  # Open I2C interface
+
+
+def lcd_init():
+    # Initialize display
+    lcd_byte(0x33, LCD_CMD)  # 110011 Initialize
+    lcd_byte(0x32, LCD_CMD)  # 110010 Initialize
+    lcd_byte(0x06, LCD_CMD)  # 000110 Cursor move direction
+    lcd_byte(0x0C, LCD_CMD)  # 001100 Display On, Cursor Off, Blink Off
+    lcd_byte(0x28, LCD_CMD)  # 101000 Data length, number of lines, font size
+    lcd_byte(0x01, LCD_CMD)  # 000001 Clear display
+    time.sleep(E_DELAY)
+
+
+def lcd_byte(bits, mode):
+    # Send byte to data pins
+    bits_high = mode | (bits & 0xF0) | LCD_BACKLIGHT
+    bits_low = mode | ((bits << 4) & 0xF0) | LCD_BACKLIGHT
+
+    # High bits
+    bus.write_byte(I2C_ADDR, bits_high)
+    lcd_toggle_enable(bits_high)
+
+    # Low bits
+    bus.write_byte(I2C_ADDR, bits_low)
+    lcd_toggle_enable(bits_low)
+
+
+def lcd_toggle_enable(bits):
+    # Toggle enable
+    time.sleep(E_DELAY)
+    bus.write_byte(I2C_ADDR, (bits | ENABLE))
+    time.sleep(E_PULSE)
+    bus.write_byte(I2C_ADDR, (bits & ~ENABLE))
+    time.sleep(E_DELAY)
+
+
+def lcd_string(message, line):
+    # Send string to display
+    message = message.ljust(LCD_WIDTH, " ")
+    lcd_byte(line, LCD_CMD)
+
+    for i in range(LCD_WIDTH):
+        lcd_byte(ord(message[i]), LCD_CHR)
+
+
+def relay():
+    # Trigger the relay
+    GPIO.output(20, GPIO.HIGH)
+    time.sleep(5)
+    GPIO.output(20, GPIO.LOW)
+    time.sleep(5)
+
+
+def encoding1(images):
+    # Perform face encoding for known images
+    encode = []
+
+    for img in images:
+        unk_encoding = face_recognition.face_encodings(img)[0]
+        encode.append(unk_encoding)
+    return encode
+
+
+# Main program
+def main():
+    # LCD initialization
+    lcd_init()
+
+    # Load known face images and encode them
+    images = []
+    names = []
+    today = date.today()
+    now = datetime.now()
+    dtString = now.strftime("%H:%M:%P")
+    path = "/home/rpi/Desktop/56/images/*.*"
+
+    for file in glob.glob(path):
+        image = cv2.imread(file)
+        a = os.path.basename(file)
+        b = os.path.splitext(a)[0]
+        names.append(b)
+        images.append(image)
+
+    encodelist = encoding1(images)
+
+    cap = cv2.VideoCapture(0)
+
+    while True:
+        ret, frame = cap.read()
+        frame1 = cv2.resize(frame, (0, 0), None, 0.25, 0.25)
+        face_locations = face_recognition.face_locations(frame1)
+        curframe_encoding = face_recognition.face_encodings(frame1, face_locations)
+
+        for encodeface, facelocation in zip(curframe_encoding, face_locations):
+            results = face_recognition.compare_faces(encodelist, encodeface)
+            distance = face_recognition.face_distance(encodelist, encodeface)
+            match_index = np.argmin(distance)
+            name = names[match_index]
+            print('name', name)
+
+            if name:
+                try:
+                    #relay()
+                    lcd_string("Access Granted", LCD_LINE_1)
+                    lcd_string(name, LCD_LINE_2)
+                except KeyboardInterrupt:
+                    print("Keyboard interrupt")
+            else:
+                lcd_string("Access Denied", LCD_LINE_1)
+                lcd_string("", LCD_LINE_2)
+
+            x1, y1, x2, y2 = facelocation
+            x1, y1, x2, y2 = x1 * 4, y1 * 4, x2 * 4, y2 * 4
+            cv2.rectangle(frame, (y1, x1), (y2, x2), (0, 0, 255), 3)
+            cv2.putText(frame, name, (y2 + 6, x2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 255), 2)
+
+        cv2.imshow("FRAME", frame)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+    print("Clean up")
+    GPIO.cleanup()
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    main()
